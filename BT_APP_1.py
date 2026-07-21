@@ -12,18 +12,29 @@ MODEL_DIR = "model"
 MODEL_FILENAME = "mobilenetv2_dynamic_quant.tflite"
 MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILENAME)
 
-# ✅ CORRECT RAW URL (direct download, not the GitHub blob page)
-MODEL_URL = "https://github.com/NirmalGaud1/brain_tumor_ai_training/raw/refs/heads/main/mobilenetv2_dynamic_quant.tflite"
+# ✅ CORRECT RAW URL (using raw.githubusercontent.com)
+MODEL_URL = "https://raw.githubusercontent.com/NirmalGaud1/brain_tumor_ai_training/main/mobilenetv2_dynamic_quant.tflite"
 
 # --- Ensure model file exists and is valid ---
 def ensure_model():
     os.makedirs(MODEL_DIR, exist_ok=True)
 
+    # Remove corrupt file if it exists but is invalid
+    if os.path.exists(MODEL_PATH):
+        with open(MODEL_PATH, 'rb') as f:
+            header = f.read(4)
+        if header != b'TFL3':
+            os.remove(MODEL_PATH)
+            st.warning("Removed corrupt model file. Re-downloading...")
+
     if not os.path.exists(MODEL_PATH):
         st.info("Downloading model... This may take a moment.")
         try:
-            response = requests.get(MODEL_URL, stream=True, timeout=30)
+            # Use a proper user-agent to avoid GitHub blocking
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(MODEL_URL, stream=True, headers=headers, timeout=30)
             response.raise_for_status()
+
             total_size = int(response.headers.get('content-length', 0))
             if total_size < 1000:
                 st.error(f"Downloaded file seems too small ({total_size} bytes). Check the URL.")
@@ -38,7 +49,7 @@ def ensure_model():
             st.error(f"Download failed: {e}")
             st.stop()
 
-    # Verify file is not empty and has TFLite magic bytes
+    # Final validation
     if os.path.getsize(MODEL_PATH) < 1000:
         st.error("Model file is too small or corrupt. Please check the download URL.")
         st.stop()
