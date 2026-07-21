@@ -10,44 +10,41 @@ st.set_page_config(page_title="Brain Tumor Detector", layout="centered", page_ic
 
 # --- Configuration ---
 MODEL_DIR = "model"
+
+# List only .h5 Keras models
 AVAILABLE_MODELS = [
-    "mobilenetv2_dynamic_quant.tflite",
-    "mobilenetv2_float16_quant.tflite",
-    "mobilenetv2_int8_quant.tflite",
+    "mobilenetv2_final.h5",
+    "mobilenetv2_best.h5"
 ]
 
-# --- Correct URL for Git LFS media files ---
-# Using media.githubusercontent.com allows fetching the true binary instead of the LFS text pointer
-GITHUB_LFS_BASE = "https://media.githubusercontent.com/media/NirmalGaud1/brain_tumor_ai_training/main/"
+# Standard raw GitHub URL base for .h5 files
+GITHUB_RAW_BASE = "https://raw.githubusercontent.com/NirmalGaud1/brain_tumor_ai_training/main/"
 
 
-# --- Function to Download and Validate Model ---
+# --- Function to Download Model ---
 @st.cache_data(show_spinner=False)
 def ensure_model(filename):
     os.makedirs(MODEL_DIR, exist_ok=True)
     model_path = os.path.join(MODEL_DIR, filename)
 
-    # Check existing file header for validity (TFLite models start with b'TFL3')
+    # Check if file exists and has valid HDF5 magic header (b'\x89HDF\r\n\x1a\n')
     if os.path.exists(model_path):
         with open(model_path, "rb") as f:
-            header = f.read(4)
-        if header != b"TFL3":
+            header = f.read(8)
+        if not header.startswith(b"\x89HDF"):
             os.remove(model_path)
 
-    # Download model if not present or removed due to corruption
+    # Download model if missing
     if not os.path.exists(model_path):
-        url = GITHUB_LFS_BASE + filename
+        url = GITHUB_RAW_BASE + filename
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
-            response = requests.get(url, stream=True, headers=headers, timeout=60)
+            response = requests.get(url, stream=True, headers=headers, timeout=120)
             response.raise_for_status()
 
             total_size = int(response.headers.get("content-length", 0))
-            if total_size < 1000:  # File too small, likely an error page or lfs pointer
-                st.error(
-                    f"Downloaded file `{filename}` is too small ({total_size} bytes). "
-                    "Ensure the file exists at the source."
-                )
+            if total_size < 1000:
+                st.error(f"Downloaded file `{filename}` is too small ({total_size} bytes). Check URL.")
                 st.stop()
 
             with open(model_path, "wb") as f:
@@ -58,30 +55,25 @@ def ensure_model(filename):
             st.error(f"Failed to download {filename}: {e}")
             st.stop()
 
-    # Final verification check
+    # Verify HDF5 format
     with open(model_path, "rb") as f:
-        header = f.read(4)
-        if header != b"TFL3":
-            st.error(
-                f"❌ File `{filename}` was downloaded, but it is not a valid TFLite binary. "
-                "Verify Git LFS tracking on your GitHub repo."
-            )
+        header = f.read(8)
+        if not header.startswith(b"\x89HDF"):
+            st.error(f"❌ `{filename}` is not a valid .h5 model file or download was incomplete.")
             st.stop()
 
     return model_path
 
 
-# --- Model Loader ---
+# --- Keras Model Loader ---
 @st.cache_resource
-def load_tflite_interpreter(path):
-    interpreter = tf.lite.Interpreter(model_path=path)
-    interpreter.allocate_tensors()
-    return interpreter
+def load_keras_model(path):
+    # compile=False speeds up loading if training state isn't needed
+    return tf.keras.models.load_model(path, compile=False)
 
 
 # --- Image Preprocessing ---
-def preprocess_image(image, input_shape):
-    target_size = (input_shape[1], input_shape[2])  # (height, width)
+def preprocess_image(image, target_size=(128, 128)):
     resized_img = image.convert("RGB").resize(target_size)
     img_array = np.array(resized_img, dtype=np.float32) / 255.0
     return np.expand_dims(img_array, axis=0)
@@ -89,58 +81,41 @@ def preprocess_image(image, input_shape):
 
 # --- Sidebar UI ---
 st.sidebar.title("⚙️ Settings")
-selected_model = st.sidebar.selectbox("Choose a TFLite Model", AVAILABLE_MODELS)
+selected_model = st.sidebar.selectbox("Choose a Model (.h5)", AVAILABLE_MODELS)
 
 # --- Model Loading Process ---
-with st.spinner(f"Preparing `{selected_model}`..."):
+with st.spinner(f"Downloading & preparing `{selected_model}`..."):
     model_path = ensure_model(selected_model)
     try:
-        interpreter = load_tflite_interpreter(model_path)
+        model = load_keras_model(model_path)
     except Exception as e:
-        st.error(f"Error initializing TFLite interpreter: {e}")
+        st.error(f"Error loading Keras model: {e}")
         st.stop()
 
-# Get model I/O details
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
-input_shape = input_details[0]["shape"]
+# Determine input shape dynamically from model
+try:
+    input_shape = model.input_shape[1:3]  # (height, width)
+    if input_shape[0] is None:
+        input_shape = (128, 128)
+except Exception:
+    input_shape = (128, 128)
 
 # --- Main Interface ---
 st.title("🧠 Brain Tumor Detection")
-st.write(f"Active Model: **{selected_model}**")
+st.write(f"Active Keras Model: **{selected_model}**")
 
-uploaded_file = st.file_uploader(
-    "Upload an MRI scan...", type=["jpg", "jpeg", "png"]
-)
+uploaded_file = st.file_uploader("Upload an MRI scan...", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    # Display image
     image = Image.open(uploaded_file)
     st.image(image, caption="Uploaded MRI Scan", use_column_width=True)
 
-    # Inference execution
     with st.spinner("Analyzing scan..."):
-        input_data = preprocess_image(image, input_shape)
+        input_data = preprocess_image(image, target_size=input_shape)
+        predictions = model.predict(input_data)
+        prob = float(predictions[0][0])
 
-        # Quantitative input conversion if needed by quantized models
-        if input_details[0]["dtype"] == np.int8 or input_details[0]["dtype"] == np.uint8:
-            scale, zero_point = input_details[0]["quantization"]
-            if scale > 0:
-                input_data = (input_data / scale + zero_point).astype(input_details[0]["dtype"])
-
-        interpreter.set_tensor(input_details[0]["index"], input_data)
-        interpreter.invoke()
-        output_data = interpreter.get_tensor(output_details[0]["index"])
-
-        # Dequantize output if required
-        if output_details[0]["dtype"] == np.int8 or output_details[0]["dtype"] == np.uint8:
-            scale, zero_point = output_details[0]["quantization"]
-            if scale > 0:
-                output_data = (output_data.astype(np.float32) - zero_point) * scale
-
-        prob = float(output_data[0][0])
-
-    # Result formatting
+    # Prediction formatting
     tumor_detected = prob > 0.5
     confidence = (prob if tumor_detected else 1.0 - prob) * 100.0
 
@@ -148,9 +123,9 @@ if uploaded_file is not None:
     st.subheader("Prediction Analysis")
 
     if tumor_detected:
-        st.error(f"### 🧬 Tumor Detected")
+        st.error("### 🧬 Tumor Detected")
     else:
-        st.success(f"### ✅ No Tumor Detected")
+        st.success("### ✅ No Tumor Detected")
 
     st.write(f"Confidence Level: **{confidence:.2f}%**")
     st.progress(min(max(prob, 0.0), 1.0))
