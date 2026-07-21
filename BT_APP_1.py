@@ -5,41 +5,70 @@ import os
 import numpy as np
 from PIL import Image
 import tensorflow as tf
-import urllib.request
+import requests
+import hashlib
 
 # --- Configuration ---
 MODEL_DIR = "model"
 MODEL_FILENAME = "mobilenetv2_dynamic_quant.tflite"
 MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILENAME)
 
-# 🔽 CHANGE THIS URL to your hosted file
-MODEL_URL = "https://github.com/NirmalGaud1/brain_tumor_ai_training/blob/main/mobilenetv2_dynamic_quant.tflite"
+# 🔽 REPLACE WITH YOUR DIRECT DOWNLOAD URL (raw file, not a web page)
+MODEL_URL = "https://raw.githubusercontent.com/NirmalGaud1/brain_tumor_ai_training/main/model/mobilenetv2_dynamic_quant.tflite"
 
-# --- Ensure model exists ---
+# --- Ensure model file exists and is valid ---
 def ensure_model():
+    os.makedirs(MODEL_DIR, exist_ok=True)
+
     if not os.path.exists(MODEL_PATH):
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        st.info(f"Downloading model...")
+        st.info("Downloading model... This may take a moment.")
         try:
-            urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+            response = requests.get(MODEL_URL, stream=True, timeout=30)
+            response.raise_for_status()
+            total_size = int(response.headers.get('content-length', 0))
+            if total_size < 1000:  # TFLite models are at least a few KB
+                st.error(f"Downloaded file seems too small ({total_size} bytes). Check the URL.")
+                st.stop()
+
+            with open(MODEL_PATH, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
             st.success("Model downloaded successfully!")
         except Exception as e:
-            st.error(f"Failed to download model: {e}")
+            st.error(f"Download failed: {e}")
+            st.stop()
+
+    # Verify file is not empty and has TFLite magic bytes
+    if os.path.getsize(MODEL_PATH) < 1000:
+        st.error("Model file is too small or corrupt. Please check the download URL.")
+        st.stop()
+
+    # Check TFLite magic bytes (first 4 bytes should be 0x54 0x46 0x4C 0x3F for TFLite flatbuffer)
+    with open(MODEL_PATH, 'rb') as f:
+        header = f.read(4)
+        if header != b'TFL3':  # Standard TFLite flatbuffer magic
+            st.error("File is not a valid TFLite model. Please check the download URL.")
             st.stop()
 
 ensure_model()
 
-# --- Load model ---
+# --- Load TFLite model ---
 @st.cache_resource
 def load_model():
     interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
     interpreter.allocate_tensors()
     return interpreter
 
-interpreter = load_model()
+try:
+    interpreter = load_model()
+except Exception as e:
+    st.error(f"Failed to load the model: {e}")
+    st.stop()
+
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
-IMG_SIZE = tuple(input_details[0]['shape'][1:3])
+IMG_SIZE = tuple(input_details[0]['shape'][1:3])  # (128, 128)
 
 def preprocess_image(image):
     image = image.resize(IMG_SIZE)
