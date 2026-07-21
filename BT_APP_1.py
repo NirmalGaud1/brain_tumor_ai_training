@@ -6,15 +6,14 @@ import numpy as np
 from PIL import Image
 import tensorflow as tf
 import requests
-import hashlib
 
 # --- Configuration ---
 MODEL_DIR = "model"
 MODEL_FILENAME = "mobilenetv2_dynamic_quant.tflite"
 MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILENAME)
 
-# 🔽 REPLACE WITH YOUR DIRECT DOWNLOAD URL (raw file, not a web page)
-MODEL_URL = "https://raw.githubusercontent.com/NirmalGaud1/brain_tumor_ai_training/main/model/mobilenetv2_dynamic_quant.tflite"
+# ✅ CORRECT RAW URL (direct download, not the GitHub blob page)
+MODEL_URL = "https://github.com/NirmalGaud1/brain_tumor_ai_training/raw/refs/heads/main/mobilenetv2_dynamic_quant.tflite"
 
 # --- Ensure model file exists and is valid ---
 def ensure_model():
@@ -26,7 +25,7 @@ def ensure_model():
             response = requests.get(MODEL_URL, stream=True, timeout=30)
             response.raise_for_status()
             total_size = int(response.headers.get('content-length', 0))
-            if total_size < 1000:  # TFLite models are at least a few KB
+            if total_size < 1000:
                 st.error(f"Downloaded file seems too small ({total_size} bytes). Check the URL.")
                 st.stop()
 
@@ -44,10 +43,9 @@ def ensure_model():
         st.error("Model file is too small or corrupt. Please check the download URL.")
         st.stop()
 
-    # Check TFLite magic bytes (first 4 bytes should be 0x54 0x46 0x4C 0x3F for TFLite flatbuffer)
     with open(MODEL_PATH, 'rb') as f:
         header = f.read(4)
-        if header != b'TFL3':  # Standard TFLite flatbuffer magic
+        if header != b'TFL3':
             st.error("File is not a valid TFLite model. Please check the download URL.")
             st.stop()
 
