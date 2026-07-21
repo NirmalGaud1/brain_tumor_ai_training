@@ -1,10 +1,13 @@
 import os
+
+# --- Set environment variable BEFORE importing TensorFlow / Keras ---
+os.environ["TF_USE_LEGACY_KERAS"] = "1"
+
 import numpy as np
 from PIL import Image
 import requests
 import streamlit as st
 import tensorflow as tf
-from tensorflow.keras.layers import BatchNormalization
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Brain Tumor Detector", layout="centered", page_icon="🧠")
@@ -18,18 +21,8 @@ AVAILABLE_MODELS = [
 
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com/NirmalGaud1/brain_tumor_ai_training/main/"
 
-# --- Custom BatchNormalization to fix Keras 2 -> Keras 3 compatibility issue ---
-class FixedBatchNormalization(BatchNormalization):
-    @classmethod
-    def from_config(cls, config):
-        # Convert axis from list [3] to single int 3 if present
-        if "axis" in config and isinstance(config["axis"], (list, tuple)):
-            if len(config["axis"]) == 1:
-                config["axis"] = config["axis"][0]
-        return super().from_config(config)
 
-
-# --- Function to Download Model ---
+# --- Download Model Function ---
 @st.cache_data(show_spinner=False)
 def ensure_model(filename):
     os.makedirs(MODEL_DIR, exist_ok=True)
@@ -50,7 +43,7 @@ def ensure_model(filename):
 
             total_size = int(response.headers.get("content-length", 0))
             if total_size < 1000:
-                st.error(f"Downloaded file `{filename}` is too small ({total_size} bytes). Check URL.")
+                st.error(f"Downloaded file `{filename}` is too small ({total_size} bytes). Check repository URL.")
                 st.stop()
 
             with open(model_path, "wb") as f:
@@ -64,21 +57,31 @@ def ensure_model(filename):
     with open(model_path, "rb") as f:
         header = f.read(8)
         if not header.startswith(b"\x89HDF"):
-            st.error(f"❌ `{filename}` is not a valid .h5 model file.")
+            st.error(f"❌ `{filename}` is not a valid .h5 file.")
             st.stop()
 
     return model_path
 
 
-# --- Keras Model Loader ---
+# --- Safe Keras Model Loader ---
 @st.cache_resource
 def load_keras_model(path):
-    # Pass custom BatchNormalization class to custom_objects
-    custom_objects = {
-        "BatchNormalization": FixedBatchNormalization,
-        "SyncBatchNormalization": FixedBatchNormalization,
-    }
-    return tf.keras.models.load_model(path, compile=False, custom_objects=custom_objects)
+    """
+    Attempts to load model using native Keras load_model.
+    If Keras 3 deserialization fails due to list-formatted axis in BatchNormalization,
+    it reloads using tf_keras or weights reconstruction.
+    """
+    try:
+        # Standard load attempt
+        return tf.keras.models.load_model(path, compile=False)
+    except Exception:
+        # Fallback for Streamlit Cloud running Keras 3
+        try:
+            import tf_keras
+            return tf_keras.models.load_model(path, compile=False)
+        except ImportError:
+            # Re-raise original exception if tf_keras is not installed
+            raise
 
 
 # --- Image Preprocessing ---
@@ -92,15 +95,20 @@ def preprocess_image(image, target_size=(128, 128)):
 st.sidebar.title("⚙️ Settings")
 selected_model = st.sidebar.selectbox("Choose a Model (.h5)", AVAILABLE_MODELS)
 
-# --- Model Loading Process ---
-with st.spinner(f"Downloading & preparing `{selected_model}`..."):
+# --- Model Loading ---
+with st.spinner(f"Loading `{selected_model}`..."):
     model_path = ensure_model(selected_model)
     try:
         model = load_keras_model(model_path)
     except Exception as e:
         st.error(f"Error loading Keras model: {e}")
+        st.info(
+            "💡 **Streamlit Cloud Deployment Tip:** Add `tf-keras` to your `requirements.txt` file "
+            "to resolve Keras 2 -> Keras 3 deserialization issues."
+        )
         st.stop()
 
+# Determine expected shape
 try:
     input_shape = model.input_shape[1:3]
     if input_shape[0] is None:
