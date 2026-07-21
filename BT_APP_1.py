@@ -4,21 +4,29 @@ from PIL import Image
 import requests
 import streamlit as st
 import tensorflow as tf
+from tensorflow.keras.layers import BatchNormalization
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Brain Tumor Detector", layout="centered", page_icon="🧠")
 
 # --- Configuration ---
 MODEL_DIR = "model"
-
-# List only .h5 Keras models
 AVAILABLE_MODELS = [
     "mobilenetv2_final.h5",
     "mobilenetv2_best.h5"
 ]
 
-# Standard raw GitHub URL base for .h5 files
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com/NirmalGaud1/brain_tumor_ai_training/main/"
+
+# --- Custom BatchNormalization to fix Keras 2 -> Keras 3 compatibility issue ---
+class FixedBatchNormalization(BatchNormalization):
+    @classmethod
+    def from_config(cls, config):
+        # Convert axis from list [3] to single int 3 if present
+        if "axis" in config and isinstance(config["axis"], (list, tuple)):
+            if len(config["axis"]) == 1:
+                config["axis"] = config["axis"][0]
+        return super().from_config(config)
 
 
 # --- Function to Download Model ---
@@ -27,14 +35,12 @@ def ensure_model(filename):
     os.makedirs(MODEL_DIR, exist_ok=True)
     model_path = os.path.join(MODEL_DIR, filename)
 
-    # Check if file exists and has valid HDF5 magic header (b'\x89HDF\r\n\x1a\n')
     if os.path.exists(model_path):
         with open(model_path, "rb") as f:
             header = f.read(8)
         if not header.startswith(b"\x89HDF"):
             os.remove(model_path)
 
-    # Download model if missing
     if not os.path.exists(model_path):
         url = GITHUB_RAW_BASE + filename
         try:
@@ -55,11 +61,10 @@ def ensure_model(filename):
             st.error(f"Failed to download {filename}: {e}")
             st.stop()
 
-    # Verify HDF5 format
     with open(model_path, "rb") as f:
         header = f.read(8)
         if not header.startswith(b"\x89HDF"):
-            st.error(f"❌ `{filename}` is not a valid .h5 model file or download was incomplete.")
+            st.error(f"❌ `{filename}` is not a valid .h5 model file.")
             st.stop()
 
     return model_path
@@ -68,8 +73,12 @@ def ensure_model(filename):
 # --- Keras Model Loader ---
 @st.cache_resource
 def load_keras_model(path):
-    # compile=False speeds up loading if training state isn't needed
-    return tf.keras.models.load_model(path, compile=False)
+    # Pass custom BatchNormalization class to custom_objects
+    custom_objects = {
+        "BatchNormalization": FixedBatchNormalization,
+        "SyncBatchNormalization": FixedBatchNormalization,
+    }
+    return tf.keras.models.load_model(path, compile=False, custom_objects=custom_objects)
 
 
 # --- Image Preprocessing ---
@@ -92,9 +101,8 @@ with st.spinner(f"Downloading & preparing `{selected_model}`..."):
         st.error(f"Error loading Keras model: {e}")
         st.stop()
 
-# Determine input shape dynamically from model
 try:
-    input_shape = model.input_shape[1:3]  # (height, width)
+    input_shape = model.input_shape[1:3]
     if input_shape[0] is None:
         input_shape = (128, 128)
 except Exception:
@@ -115,7 +123,6 @@ if uploaded_file is not None:
         predictions = model.predict(input_data)
         prob = float(predictions[0][0])
 
-    # Prediction formatting
     tumor_detected = prob > 0.5
     confidence = (prob if tumor_detected else 1.0 - prob) * 100.0
 
